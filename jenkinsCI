@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+
+    environment {
+        BACKEND_REPO = 'https://github.com/Xemailverify/xcampaignbackend.git'
+        ACR_LOGIN_SERVER = 'b2capplication.azurecr.io'
+        ACR_NAME = 'b2cApplication'
+        BACKEND_REPOSITORY = 'xemailcampaignbackend'
+        AZURE_CREDENTIALS_ID = 'azure-acr-service-principal'
+        GIT_CREDENTIALS = 'github-b2c'
+        EMAIL_RECIPIENT = 'kanhaiya.gupta@xemailverify.com,ashutosh.dubey@xemailverify.com'
+        BACKEND_DOCKER_TAG = "${BUILD_NUMBER}"
+        
+    }
+    stages {
+        stage('Cleanup Workspace') {
+            steps { cleanWs() }
+        }
+
+        stage('Clone Repository') {
+            steps {
+                dir('xcampaignbackend/') {
+                    git branch: 'master', credentialsId: "${GIT_CREDENTIALS}", url: "${BACKEND_REPO}"
+                }
+            }
+        }
+        stage('Inject Environment File from AWS Secrets Manager') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-credentials']]) {
+                    script {
+                        sh '''
+                            set +x  
+                            SECRET_VALUE=$(aws secretsmanager get-secret-value --secret-id xemailcampaign-backend-env --region ap-south-1 --query SecretString --output text)
+                            echo "$SECRET_VALUE" > xcampaignbackend/.env
+                            set -x
+                        '''
+                        echo ".env file injected successfully to xcampaignbackend/.env (content hidden)."
+                    }
+                }
+            }
+        }
+        stage('Inject googleserviceAccount File from AWS Secrets Manager') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-credentials']]) {
+                    script {
+                        sh '''
+                            mkdir -p xcampaignbackend/googleserviceaccount
+                            set +x  
+                            SECRET_VALUE=$(aws secretsmanager get-secret-value --secret-id xemailcampaign-475006-33a55d04334b --region ap-south-1 --query SecretString --output text)
+                            echo "$SECRET_VALUE" > xcampaignbackend/googleserviceaccount/xemailcampaign-475006-33a55d04334b.json
+                            set -x
+                        '''
+                        echo ".env file injected successfully (content hidden)."
+                    }
+                }
+            }
+        }
+        stage('Azure Login') {
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: AZURE_CREDENTIALS_ID, usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET'),
+                    string(credentialsId: 'azure-tenant-id', variable: 'AZURE_TENANT_ID')
+                ]) {
+                    sh '''
+                        az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+                        az acr login --name ${ACR_NAME}
+                    '''
+                }
+            }
+        }
+
+        stage('Build & Push Backend Image') {
+            steps {
+                script {
+                    def backendImage = "${ACR_LOGIN_SERVER}/${BACKEND_REPOSITORY}:${env.BACKEND_DOCKER_TAG}"
+                    dir('xcampaignbackend/') {
+                        withCredentials([
+                            string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN'),
+                            usernamePassword(credentialsId: AZURE_CREDENTIALS_ID, usernameVariable: 'AZURE_CLIENT_ID', passwordVariable: 'AZURE_CLIENT_SECRET')
+                        ]) {
+                            sh """
+                                export DOCKER_BUILDKIT=0
+                                docker build --no-cache -t ${backendImage} .
+                                docker login ${ACR_LOGIN_SERVER} -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET
+                                docker push ${backendImage}
+                                docker rmi ${backendImage} || true
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                build job: 'Kubernetes Deployment (XemailCampaign-Backend)', 
+                    parameters: [
+                        string(name: 'BACKEND_DOCKER_TAG', value: "${env.BACKEND_DOCKER_TAG}")
+                    ],
+                    wait: true  // Set to true if you want this pipeline to wait until the other job completes
+            }
+            emailext(
+                subject: "XemailCampaign Backend Docker Build Successful",
+                body: "<p>Backend Docker image built and pushed:<br><code>${ACR_LOGIN_SERVER}/${BACKEND_REPOSITORY}:${env.BACKEND_DOCKER_TAG}</code></p>",
+                mimeType: 'text/html',
+                to: "${EMAIL_RECIPIENT}"
+            )
+        }
+        failure {
+            emailext(
+                subject: "XemailCampaign Backend Docker Build Failed",
+                body: "<p>Please check the Jenkins logs for details.</p>",
+                mimeType: 'text/html',
+                to: "${EMAIL_RECIPIENT}"
+            )
+        }
+    }
+}

@@ -1,0 +1,28 @@
+pipeline{
+
+    agent any
+    //here any = keyword given by jenkins
+    // here any = any availbale server where jenkins can run the pipeline
+    // rightnow the available server the ec2 machine where jenkins is installed
+    // so any = current machine
+    
+    tools{
+        maven 'mymaven'
+    }
+    // here mymaven = version of the maven that we configured in tools section of jenkins
+    
+    stages{
+        stage('clone the repo'){
+            steps{
+                git branch: 'productions', url: 'https://github.com/himanshusingh892051-singh/git-repo-clone.git'
+            }
+        }
+        stage ('build the code'){
+            steps{
+               sh  'mvn package'
+               // if using window give: bat 'mvn compile ' 
+            }
+        }
+    }
+
+}
