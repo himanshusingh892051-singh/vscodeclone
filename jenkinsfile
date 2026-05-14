@@ -20,6 +20,7 @@ pipeline{
         stage ('build the code'){
             steps{
                sh  'mvn package'
+                echo 'building the code'
                // if using window give: bat 'mvn compile ' 
             }
         }
